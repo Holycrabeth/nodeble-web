@@ -1,0 +1,12 @@
+# Cloudflare Pages build artifacts
+.wrangler/
+
+# OS / editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local-only Cloudflare Pages config
+wrangler.toml.local

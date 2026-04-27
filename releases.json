@@ -1,0 +1,62 @@
+{
+  "manifest_version": "1",
+  "manifest_url": "https://nodeble.app/releases.json",
+  "updated_at": "2026-04-26T20:00:00Z",
+  "note": "Phase A placeholder — versions are stub until real release tagging lands in Phase F",
+  "strategies": {
+    "ic": {
+      "latest": "0.0.0",
+      "released_at": "2026-04-26T20:00:00Z",
+      "changelog_url": "https://github.com/Holycrabeth/nodeble/releases",
+      "repo_url": "https://github.com/Holycrabeth/nodeble"
+    },
+    "wheel": {
+      "latest": "0.0.0",
+      "released_at": "2026-04-26T20:00:00Z",
+      "changelog_url": "https://github.com/Holycrabeth/nodeble-wheel/releases",
+      "repo_url": "https://github.com/Holycrabeth/nodeble-wheel"
+    },
+    "pmcc": {
+      "latest": "0.0.0",
+      "released_at": "2026-04-26T20:00:00Z",
+      "changelog_url": "https://github.com/Holycrabeth/nodeble-pmcc/releases",
+      "repo_url": "https://github.com/Holycrabeth/nodeble-pmcc"
+    },
+    "directionalspread": {
+      "latest": "0.0.0",
+      "released_at": "2026-04-26T20:00:00Z",
+      "changelog_url": "https://github.com/Holycrabeth/nodeble-directionalspread/releases",
+      "repo_url": "https://github.com/Holycrabeth/nodeble-directionalspread"
+    },
+    "calendar": {
+      "latest": "0.0.0",
+      "released_at": "2026-04-26T20:00:00Z",
+      "changelog_url": "https://github.com/Holycrabeth/nodeble-calendar/releases",
+      "repo_url": "https://github.com/Holycrabeth/nodeble-calendar"
+    },
+    "collar": {
+      "latest": "0.0.0",
+      "released_at": "2026-04-26T20:00:00Z",
+      "changelog_url": "https://github.com/Holycrabeth/nodeble-collar/releases",
+      "repo_url": "https://github.com/Holycrabeth/nodeble-collar"
+    },
+    "ironbutterfly": {
+      "latest": "0.0.0",
+      "released_at": "2026-04-26T20:00:00Z",
+      "changelog_url": "https://github.com/Holycrabeth/nodeble-ironbutterfly/releases",
+      "repo_url": "https://github.com/Holycrabeth/nodeble-ironbutterfly"
+    },
+    "straddle": {
+      "latest": "0.0.0",
+      "released_at": "2026-04-26T20:00:00Z",
+      "changelog_url": "https://github.com/Holycrabeth/nodeble-straddle/releases",
+      "repo_url": "https://github.com/Holycrabeth/nodeble-straddle"
+    },
+    "strangle": {
+      "latest": "0.0.0",
+      "released_at": "2026-04-26T20:00:00Z",
+      "changelog_url": "https://github.com/Holycrabeth/nodeble-strangle/releases",
+      "repo_url": "https://github.com/Holycrabeth/nodeble-strangle"
+    }
+  }
+}
