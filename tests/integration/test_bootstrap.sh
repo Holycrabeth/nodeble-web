@@ -117,10 +117,11 @@ start_plain_container() {
 start_systemd_container() {
     local name="$1" image="$2"
     docker rm -f "$name" >/dev/null 2>&1 || true
-    docker run -d --name "$name" --privileged \
-        --tmpfs /run --tmpfs /run/lock \
-        -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
-        "$image" /sbin/init >/dev/null
+    # cgroup v2 flags: --cgroupns=host + rw cgroup mount (Tower host runs cgroup v2;
+    # legacy cgroup v1 ro mount + /sbin/init pattern fails to boot systemd here).
+    docker run -d --name "$name" --privileged --cgroupns=host \
+        -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+        "$image" >/dev/null
     register_container "$name"
     sleep 3
 }
@@ -194,18 +195,88 @@ test_network_none() {
 }
 
 # ──────────────────────────────────────────────────────────────────
-# Happy-path test stubs — HOLD pending CTO arbitration
-# (private-repo blocker on Holycrabeth/nodeble-api-server; 5/6 SGT)
+# Failure-mode test 4 (Option 2): GITHUB_TOKEN env var missing
+# Per CTO 2026-05-06 PAT-aware-clone dispatch §5
+# ──────────────────────────────────────────────────────────────────
+test_github_token_missing() {
+    info "test_github_token_missing: no GITHUB_TOKEN env → STATUS: failure: missing_github_token"
+    local container="bootstrap-test-no-pat"
+    local log="$LOG_DIR/github-token-missing.log"
+
+    start_systemd_container "$container" "jrei/systemd-ubuntu:24.04"
+    # Pre-stage prereqs so bootstrap reaches step_clone_repo (where token check fires)
+    docker exec "$container" apt-get update -qq >/dev/null 2>&1
+    docker exec "$container" apt-get install -qq -y python3.12 python3.12-venv git curl sudo iproute2 ca-certificates >/dev/null 2>&1
+    docker cp "$BOOTSTRAP_SH" "$container:/tmp/bootstrap.sh" >/dev/null
+
+    # Run WITHOUT GITHUB_TOKEN env (deliberately not setting it)
+    docker exec "$container" bash /tmp/bootstrap.sh > "$log" 2>&1 || true
+
+    if assert_status "$log" "failure: missing_github_token"; then
+        pass "test_github_token_missing"
+    else
+        fail "test_github_token_missing: expected 'STATUS: failure: missing_github_token'"
+        dump_log "$log"
+    fi
+    docker rm -f "$container" >/dev/null
+}
+
+# ──────────────────────────────────────────────────────────────────
+# Failure-mode test 5 (Option 2): PAT redacted in error output
+# Per CTO 2026-05-06 PAT-aware-clone dispatch §5 + §1 hygiene #3
+# ──────────────────────────────────────────────────────────────────
+test_pat_redacted_in_error_output() {
+    info "test_pat_redacted_in_error_output: invalid PAT → token must NOT appear in any output"
+    local container="bootstrap-test-pat-redact"
+    local log="$LOG_DIR/pat-redact.log"
+    # Distinctive fake PAT — easy to grep for in log
+    local fake_pat="ghp_FAKETESTPATFORREDACTIONVERIFICATION1234567890"
+
+    start_systemd_container "$container" "jrei/systemd-ubuntu:24.04"
+    docker exec "$container" apt-get update -qq >/dev/null 2>&1
+    docker exec "$container" apt-get install -qq -y python3.12 python3.12-venv git curl sudo iproute2 ca-certificates >/dev/null 2>&1
+    docker cp "$BOOTSTRAP_SH" "$container:/tmp/bootstrap.sh" >/dev/null
+
+    # Run with INVALID PAT — clone will fail (401); verify PAT not leaked anywhere
+    docker exec --env "GITHUB_TOKEN=$fake_pat" "$container" bash /tmp/bootstrap.sh > "$log" 2>&1 || true
+
+    if grep -q "$fake_pat" "$log"; then
+        fail "test_pat_redacted_in_error_output: fake PAT '$fake_pat' appeared in log!"
+        dump_log "$log"
+        docker rm -f "$container" >/dev/null
+        return
+    fi
+
+    # Sanity: clone should have failed (with redacted output evident OR distinct status)
+    if ! grep -qE "^STATUS: failure:" "$log"; then
+        fail "test_pat_redacted_in_error_output: expected clone failure but no failure STATUS"
+        dump_log "$log"
+        docker rm -f "$container" >/dev/null
+        return
+    fi
+
+    pass "test_pat_redacted_in_error_output"
+    docker rm -f "$container" >/dev/null
+}
+
+# ──────────────────────────────────────────────────────────────────
+# Happy-path test stubs — HOLD pending CEO PAT generation
+# (Option 2 ratified; PAT scoped repo:read on 14 NODEBLE repos.
+#  CTO 2026-05-06 PAT-aware-clone dispatch §3.)
 #
-# When CTO ratifies one of Options 1/2/3/4, fill in:
-#   - Option 1 (public repo):       no test code change; clone-repo just works
-#   - Option 2 (--github-token):    pass token via env to bootstrap.sh invocation
-#   - Option 3 (release-tarball):   verify curl + tar -xz path; assert tarball checksum
-#   - Option 4 (Mac SCP delivery):  pre-stage source via docker cp to mimic SCP
+# Resume mechanism on PAT availability:
+#   - Set NODEBLE_TEST_PAT env var (CEO-provided) before running this script
+#   - Each test injects via `docker exec --env GITHUB_TOKEN="$NODEBLE_TEST_PAT"`
+#   - Verify x-access-token URL pattern in clone, no PAT in output, post-clone
+#     unset, RESULT_TOKEN/FINGERPRINT/PORT all emitted, STATUS: success
 # ──────────────────────────────────────────────────────────────────
 test_happy_path() {
     local label="$1"
-    skip "test_happy_path[$label]: HOLD pending CTO option choice on private-repo blocker"
+    if [ -z "${NODEBLE_TEST_PAT:-}" ]; then
+        skip "test_happy_path[$label]: HOLD pending CEO PAT generation (set NODEBLE_TEST_PAT env to resume)"
+        return
+    fi
+    skip "test_happy_path[$label]: PAT present but body not yet implemented (Session 2 resume in progress)"
 }
 
 test_idempotent_rerun() {
@@ -236,8 +307,10 @@ main() {
     test_unsupported_os
     test_requires_sudo
     test_network_none
+    test_github_token_missing
+    test_pat_redacted_in_error_output
     info ""
-    info "=== Happy-path tests (HOLD pending CTO option choice) ==="
+    info "=== Happy-path tests (HOLD pending CEO PAT generation) ==="
     local entry label
     for entry in "${HAPPY_DISTROS[@]}"; do
         label="${entry%%|*}"

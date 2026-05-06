@@ -18,7 +18,7 @@ set -euo pipefail
 # Constants
 # ──────────────────────────────────────────────────────────────────
 readonly BOOTSTRAP_VERSION="0.1.0"
-readonly REPO_URL="https://github.com/Holycrabeth/nodeble-api-server.git"
+readonly REPO_PATH="Holycrabeth/nodeble-api-server"
 readonly REPO_DIR="$HOME/projects/nodeble-api-server"
 readonly NODEBLE_API_HOME="$HOME/.nodeble-api"
 readonly CONFIG_DIR="$NODEBLE_API_HOME/config"
@@ -34,6 +34,8 @@ readonly DEFAULT_PORT="${NODEBLE_API_PORT:-8765}"
 readonly NODEBLE_HOSTNAME_SAN="${NODEBLE_HOSTNAME:-}"
 readonly MIN_DISK_FREE_MB=500
 readonly STARTUP_WAIT_SECS=10
+# Resolve username — $USER is unset in non-interactive docker exec / SSH env.
+readonly USER_NAME="${USER:-$(id -un)}"
 
 # ──────────────────────────────────────────────────────────────────
 # Mutable state
@@ -326,26 +328,74 @@ step_python_install() {
 # Step 4 — loginctl enable-linger
 # ──────────────────────────────────────────────────────────────────
 step_enable_linger() {
-    quiet loginctl enable-linger "$USER" || die "enable_linger_failed"
-    if loginctl show-user "$USER" 2>/dev/null | grep -q "Linger=yes"; then
-        emit_step_ok "enable-linger" "linger active for $USER"
+    quiet loginctl enable-linger "$USER_NAME" || die "enable_linger_failed"
+    if loginctl show-user "$USER_NAME" 2>/dev/null | grep -q "Linger=yes"; then
+        emit_step_ok "enable-linger" "linger active for $USER_NAME"
         return 0
     fi
     die "enable_linger_verify_failed"
 }
 
 # ──────────────────────────────────────────────────────────────────
-# Step 5 — clone repo
+# Step 5 — clone repo (PAT-aware, Option 2 per CTO 2026-05-06 dispatch
+# `bootstrap-pat-aware-clone-dispatch.md`)
 # ──────────────────────────────────────────────────────────────────
+
+# Token-authenticated clone of a private NODEBLE repo using fine-grained PAT
+# delivered via $GITHUB_TOKEN env var. PAT must have repo:read scope.
+# Mac app injects via SSH env at install time; direct CLI use requires
+# `export GITHUB_TOKEN=<pat>` before invocation.
+clone_private_repo() {
+    local repo_path="$1"
+    local target_dir="$2"
+
+    if [ -z "${GITHUB_TOKEN:-}" ]; then
+        echo "ERROR: GITHUB_TOKEN env var not set." >&2
+        echo "  Private NODEBLE repo clone requires fine-grained PAT with repo:read scope." >&2
+        echo "  Mac app delivers via SSH env at install time." >&2
+        echo "  Direct CLI use: export GITHUB_TOKEN=<your_pat> before running bootstrap.sh" >&2
+        return 1
+    fi
+
+    local auth_url="https://x-access-token:${GITHUB_TOKEN}@github.com/${repo_path}.git"
+
+    mkdir -p "$(dirname "$target_dir")"
+
+    # Pipe through sed to redact PAT from any error output (defensive vs accidental log leak).
+    # In VERBOSE mode, redacted output goes to stdout (human-debug); else stderr (parser-clean).
+    if [ "$VERBOSE" = "true" ]; then
+        git clone "$auth_url" "$target_dir" 2>&1 | sed "s|${GITHUB_TOKEN}|<REDACTED>|g"
+    else
+        git clone "$auth_url" "$target_dir" 2>&1 | sed "s|${GITHUB_TOKEN}|<REDACTED>|g" >&2
+    fi
+    local rc="${PIPESTATUS[0]}"
+
+    if [ "$rc" -ne 0 ]; then
+        echo "ERROR: git clone failed for ${repo_path} (exit $rc)." >&2
+        echo "  Verify GITHUB_TOKEN has repo:read scope on ${repo_path}." >&2
+        return "$rc"
+    fi
+
+    # Defensive: drop any cached credential helper config that may have stored PAT.
+    git -C "$target_dir" config --unset-all credential.helper 2>/dev/null || true
+
+    return 0
+}
+
 step_clone_repo() {
     if [ -d "$REPO_DIR/.git" ]; then
+        # Update path: existing clone's stored remote URL retains x-access-token PAT
+        # (acceptable on-disk persistence trade-off — repo:read scope, owner-readable
+        # mode 0644 .git/config; flagged for CTO post-verify discussion).
         ( cd "$REPO_DIR" \
             && quiet git fetch origin \
             && quiet git reset --hard origin/main ) \
             || die "git_update_failed"
     else
-        mkdir -p "$(dirname "$REPO_DIR")"
-        quiet git clone "$REPO_URL" "$REPO_DIR" || die "git_clone_failed"
+        if [ -z "${GITHUB_TOKEN:-}" ]; then
+            die "missing_github_token"
+        fi
+        clone_private_repo "$REPO_PATH" "$REPO_DIR" || die "git_clone_failed"
     fi
     local head
     head=$(cd "$REPO_DIR" && git log -1 --format='%h %s' 2>/dev/null || echo "unknown")
@@ -552,6 +602,9 @@ main() {
     run_step "python-install"     step_python_install
     run_step "enable-linger"      step_enable_linger
     run_step "clone-repo"         step_clone_repo
+    # Security hygiene per Option 2 dispatch §1.2 — drop PAT from env before
+    # any subprocess fan-out (pip, openssl, systemctl child processes).
+    unset GITHUB_TOKEN
     run_step "venv-create"        step_venv_create
     run_step "pip-install"        step_pip_install
     run_step "generate-api-token" step_generate_api_token
