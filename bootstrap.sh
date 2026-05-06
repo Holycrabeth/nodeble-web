@@ -305,23 +305,40 @@ step_disk_check() {
 # Step 3 — Python 3.12+
 # ──────────────────────────────────────────────────────────────────
 step_python_install() {
-    if command -v python3.12 >/dev/null 2>&1; then
-        local v
-        v=$(python3.12 --version 2>&1 | awk '{print $2}')
-        emit_step_ok "python-install" "Python $v already present"
-        return 0
-    fi
+    # Ensure python3.12 + venv + dev all installed (binary alone insufficient —
+    # Ubuntu 24.04 ships python3.12 in main but python3.12-venv as separate pkg
+    # that may be absent on minimal images). apt-get install is idempotent.
+    # Ubuntu 22.04 main lacks python3.12 → deadsnakes PPA fallback.
+    # Debian 12 main lacks python3.12 → bookworm-backports.
+    quiet maybe_sudo apt-get update -y || die "apt_update_failed"
+
     if [ "$OS_ID" = "ubuntu" ]; then
-        quiet maybe_sudo apt-get install -y software-properties-common \
-            || die "software_properties_install_failed"
-        quiet maybe_sudo add-apt-repository -y ppa:deadsnakes/ppa \
-            || die "deadsnakes_ppa_failed"
+        if ! quiet maybe_sudo apt-get install -y python3.12 python3.12-venv python3.12-dev; then
+            quiet maybe_sudo apt-get install -y software-properties-common \
+                || die "software_properties_install_failed"
+            quiet maybe_sudo add-apt-repository -y ppa:deadsnakes/ppa \
+                || die "deadsnakes_ppa_failed"
+            quiet maybe_sudo apt-get update -y || die "apt_update_failed"
+            quiet maybe_sudo apt-get install -y python3.12 python3.12-venv python3.12-dev \
+                || die "python_install_failed"
+        fi
+    elif [ "$OS_ID" = "debian" ]; then
+        if ! grep -rq "bookworm-backports" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+            echo "deb http://deb.debian.org/debian bookworm-backports main" \
+                | maybe_sudo tee /etc/apt/sources.list.d/bookworm-backports.list >/dev/null
+            quiet maybe_sudo apt-get update -y || die "apt_update_failed"
+        fi
+        quiet maybe_sudo apt-get install -y -t bookworm-backports \
+                python3.12 python3.12-venv python3.12-dev \
+            || die "python_install_failed"
     fi
-    quiet maybe_sudo apt-get update -y \
-        || die "apt_update_failed"
-    quiet maybe_sudo apt-get install -y python3.12 python3.12-venv python3.12-dev \
-        || die "python_install_failed"
-    emit_step_ok "python-install" "Python 3.12 installed"
+
+    if ! command -v python3.12 >/dev/null 2>&1; then
+        die "python_install_failed"
+    fi
+    local v
+    v=$(python3.12 --version 2>&1 | awk '{print $2}')
+    emit_step_ok "python-install" "Python $v ready"
 }
 
 # ──────────────────────────────────────────────────────────────────
@@ -330,7 +347,14 @@ step_python_install() {
 step_enable_linger() {
     quiet loginctl enable-linger "$USER_NAME" || die "enable_linger_failed"
     if loginctl show-user "$USER_NAME" 2>/dev/null | grep -q "Linger=yes"; then
-        emit_step_ok "enable-linger" "linger active for $USER_NAME"
+        # Export XDG_RUNTIME_DIR for subsequent systemctl --user calls.
+        # PAM (pam_systemd) sets this in interactive sessions; non-interactive
+        # SSH / docker exec environments do not. Linger ensures /run/user/<uid>
+        # persists, so this directory exists from this point on.
+        local uid
+        uid=$(id -u)
+        export XDG_RUNTIME_DIR="/run/user/$uid"
+        emit_step_ok "enable-linger" "linger active for $USER_NAME, XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
         return 0
     fi
     die "enable_linger_verify_failed"
@@ -588,6 +612,15 @@ step_systemd_start() {
 # ──────────────────────────────────────────────────────────────────
 main() {
     parse_args "$@"
+
+    # Set XDG_RUNTIME_DIR proactively so idempotency-probe (Step 0) can talk
+    # to the user's systemd manager via `systemctl --user`. PAM normally sets
+    # this in interactive logins; non-interactive SSH / docker exec do not.
+    # Directory may not yet exist on a fresh box (linger not yet enabled);
+    # systemctl --user fails gracefully → probe returns 1 → fresh-install path.
+    local _uid
+    _uid=$(id -u)
+    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$_uid}"
 
     run_step "idempotency-probe"  step_idempotency_probe
     run_step "sudo-probe"         step_sudo_probe

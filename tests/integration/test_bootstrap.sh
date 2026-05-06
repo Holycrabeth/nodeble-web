@@ -260,33 +260,144 @@ test_pat_redacted_in_error_output() {
 }
 
 # ──────────────────────────────────────────────────────────────────
-# Happy-path test stubs — HOLD pending CEO PAT generation
-# (Option 2 ratified; PAT scoped repo:read on 14 NODEBLE repos.
-#  CTO 2026-05-06 PAT-aware-clone dispatch §3.)
+# Happy-path tests (CTO spec §9.1 + Option 2 PAT contract)
 #
-# Resume mechanism on PAT availability:
-#   - Set NODEBLE_TEST_PAT env var (CEO-provided) before running this script
-#   - Each test injects via `docker exec --env GITHUB_TOKEN="$NODEBLE_TEST_PAT"`
-#   - Verify x-access-token URL pattern in clone, no PAT in output, post-clone
-#     unset, RESULT_TOKEN/FINGERPRINT/PORT all emitted, STATUS: success
+# Container reuse pattern: test_happy_path creates container, leaves it
+# running for test_idempotent_rerun + test_uninstall_reinstall on the
+# same label. Cleanup at script-exit trap.
 # ──────────────────────────────────────────────────────────────────
+container_running() {
+    docker ps --format '{{.Names}}' | grep -qx "$1"
+}
+
 test_happy_path() {
-    local label="$1"
+    local label="$1" image="$2"
     if [ -z "${NODEBLE_TEST_PAT:-}" ]; then
-        skip "test_happy_path[$label]: HOLD pending CEO PAT generation (set NODEBLE_TEST_PAT env to resume)"
+        skip "test_happy_path[$label]: NODEBLE_TEST_PAT env not set (export NODEBLE_TEST_PAT=\$(cat ~/.config/nodeble-bootstrap-pat) to resume)"
         return
     fi
-    skip "test_happy_path[$label]: PAT present but body not yet implemented (Session 2 resume in progress)"
+    # Debian 12 hard constraint (5/6 SGT verify-from-source): bookworm + bookworm-backports
+    # ship only python3.11; no path to python3.12 short of source-build / pyenv / deadsnakes-
+    # equivalent. Surfaced to 协作总监 + CTO for arbitration (drop Debian 12 vs relax to
+    # python3.11 vs source-build vs deadsnakes-equivalent). Tests held until decision.
+    if [ "$label" = "debian-12" ]; then
+        skip "test_happy_path[debian-12]: HOLD — Debian 12 lacks python3.12 in main+backports (5/6 SGT escalation)"
+        return
+    fi
+
+    info "test_happy_path[$label]: fresh install on $image → STATUS: success + RESULT_*"
+    local container="bootstrap-test-happy-$label"
+    local log="$LOG_DIR/happy-$label-fresh.log"
+
+    start_systemd_container "$container" "$image"
+    docker exec "$container" apt-get update -qq >/dev/null 2>&1 || true
+    docker exec "$container" apt-get install -qq -y curl git sudo iproute2 ca-certificates >/dev/null 2>&1 || true
+    docker cp "$BOOTSTRAP_SH" "$container:/tmp/bootstrap.sh" >/dev/null
+
+    docker exec --env "GITHUB_TOKEN=$NODEBLE_TEST_PAT" "$container" \
+        bash /tmp/bootstrap.sh > "$log" 2>&1 || true
+
+    # Defensive: scan for PAT leak in any log (security regression check)
+    if grep -q "$NODEBLE_TEST_PAT" "$log"; then
+        fail "test_happy_path[$label]: PAT leaked into log!"
+        dump_log "$log"
+        return
+    fi
+
+    if ! assert_status "$log" "success"; then
+        fail "test_happy_path[$label]: expected STATUS: success"
+        dump_log "$log"
+        return
+    fi
+    if ! assert_result "$log" "TOKEN" \
+       || ! assert_result "$log" "FINGERPRINT" \
+       || ! assert_result "$log" "PORT" "8765"; then
+        fail "test_happy_path[$label]: missing one or more RESULT_* lines"
+        dump_log "$log"
+        return
+    fi
+
+    # systemctl --user verification needs XDG_RUNTIME_DIR exported in this fresh
+    # docker exec session (PAM doesn't run in non-interactive exec).
+    if ! docker exec --env "XDG_RUNTIME_DIR=/run/user/0" "$container" \
+            systemctl --user is-active nodeble-api-server.service >/dev/null 2>&1; then
+        fail "test_happy_path[$label]: STATUS: success but systemd service not active"
+        dump_log "$log"
+        return
+    fi
+
+    pass "test_happy_path[$label]"
 }
 
 test_idempotent_rerun() {
     local label="$1"
-    skip "test_idempotent_rerun[$label]: HOLD (downstream of test_happy_path)"
+    if [ -z "${NODEBLE_TEST_PAT:-}" ]; then
+        skip "test_idempotent_rerun[$label]: NODEBLE_TEST_PAT env not set"
+        return
+    fi
+    if [ "$label" = "debian-12" ]; then
+        skip "test_idempotent_rerun[debian-12]: HOLD downstream of test_happy_path[debian-12]"
+        return
+    fi
+    local container="bootstrap-test-happy-$label"
+    if ! container_running "$container"; then
+        skip "test_idempotent_rerun[$label]: container missing (test_happy_path failed?)"
+        return
+    fi
+
+    info "test_idempotent_rerun[$label]: 2nd run → STATUS: already_installed"
+    local log="$LOG_DIR/happy-$label-rerun.log"
+
+    docker exec --env "GITHUB_TOKEN=$NODEBLE_TEST_PAT" "$container" \
+        bash /tmp/bootstrap.sh > "$log" 2>&1 || true
+
+    if assert_status "$log" "already_installed"; then
+        pass "test_idempotent_rerun[$label]"
+    else
+        fail "test_idempotent_rerun[$label]: expected STATUS: already_installed"
+        dump_log "$log"
+    fi
 }
 
 test_uninstall_reinstall() {
     local label="$1"
-    skip "test_uninstall_reinstall[$label]: HOLD (downstream of test_happy_path)"
+    if [ -z "${NODEBLE_TEST_PAT:-}" ]; then
+        skip "test_uninstall_reinstall[$label]: NODEBLE_TEST_PAT env not set"
+        return
+    fi
+    if [ "$label" = "debian-12" ]; then
+        skip "test_uninstall_reinstall[debian-12]: HOLD downstream of test_happy_path[debian-12]"
+        return
+    fi
+    local container="bootstrap-test-happy-$label"
+    if ! container_running "$container"; then
+        skip "test_uninstall_reinstall[$label]: container missing"
+        return
+    fi
+
+    info "test_uninstall_reinstall[$label]: clean state + reinstall → STATUS: success"
+    local log="$LOG_DIR/happy-$label-reinstall.log"
+
+    docker exec "$container" bash -c '
+        systemctl --user stop nodeble-api-server.service 2>/dev/null || true
+        systemctl --user disable nodeble-api-server.service 2>/dev/null || true
+        rm -rf "$HOME/projects/nodeble-api-server" "$HOME/.nodeble-api"
+        rm -f "$HOME/.config/systemd/user/nodeble-api-server.service"
+        systemctl --user daemon-reload 2>/dev/null || true
+    ' >/dev/null 2>&1 || true
+
+    docker exec --env "GITHUB_TOKEN=$NODEBLE_TEST_PAT" "$container" \
+        bash /tmp/bootstrap.sh > "$log" 2>&1 || true
+
+    if assert_status "$log" "success"; then
+        pass "test_uninstall_reinstall[$label]"
+    else
+        fail "test_uninstall_reinstall[$label]: expected STATUS: success on reinstall"
+        dump_log "$log"
+    fi
+
+    # Cleanup: this is the last test for this distro, can drop the container
+    docker rm -f "$container" >/dev/null 2>&1 || true
 }
 
 # ──────────────────────────────────────────────────────────────────
@@ -310,11 +421,12 @@ main() {
     test_github_token_missing
     test_pat_redacted_in_error_output
     info ""
-    info "=== Happy-path tests (HOLD pending CEO PAT generation) ==="
-    local entry label
+    info "=== Happy-path tests (need NODEBLE_TEST_PAT env) ==="
+    local entry label image
     for entry in "${HAPPY_DISTROS[@]}"; do
         label="${entry%%|*}"
-        test_happy_path "$label"
+        image="${entry#*|}"
+        test_happy_path "$label" "$image"
         test_idempotent_rerun "$label"
         test_uninstall_reinstall "$label"
     done
@@ -323,7 +435,7 @@ main() {
     info "=== Summary ==="
     info "PASS: $PASS"
     info "FAIL: $FAIL"
-    info "SKIP: $SKIP (held; resume on CTO ack of Option 1/2/3/4)"
+    info "SKIP: $SKIP"
 
     [ "$FAIL" -eq 0 ]
 }
