@@ -278,12 +278,14 @@ step_os_check() {
             fi
             ;;
         debian)
-            if ! [[ "$major" =~ ^[0-9]+$ ]] || [ "$major" -lt 12 ]; then
-                die "debian_too_old: $OS_VERSION_ID (need 12+)"
-            fi
+            # CEO 2026-05-06 ratified Option 1 — drop Debian 12 from supported OS.
+            # bookworm + bookworm-backports lack python3.12 (only 3.11 + 3.13);
+            # source-build / pyenv / deadsnakes-equivalent kill bootstrap UX.
+            # Close-circle (Tower / 茗茗 / YB) all Ubuntu, zero Debian users.
+            die "unsupported_os: debian (Ubuntu 22.04+ only; Debian lacks python3.12 in main+backports)"
             ;;
         *)
-            die "unsupported_os: $OS_ID (need ubuntu|debian)"
+            die "unsupported_os: $OS_ID (need ubuntu)"
             ;;
     esac
     emit_step_ok "os-check" "$OS_ID $OS_VERSION_ID"
@@ -309,27 +311,15 @@ step_python_install() {
     # Ubuntu 24.04 ships python3.12 in main but python3.12-venv as separate pkg
     # that may be absent on minimal images). apt-get install is idempotent.
     # Ubuntu 22.04 main lacks python3.12 → deadsnakes PPA fallback.
-    # Debian 12 main lacks python3.12 → bookworm-backports.
     quiet maybe_sudo apt-get update -y || die "apt_update_failed"
 
-    if [ "$OS_ID" = "ubuntu" ]; then
-        if ! quiet maybe_sudo apt-get install -y python3.12 python3.12-venv python3.12-dev; then
-            quiet maybe_sudo apt-get install -y software-properties-common \
-                || die "software_properties_install_failed"
-            quiet maybe_sudo add-apt-repository -y ppa:deadsnakes/ppa \
-                || die "deadsnakes_ppa_failed"
-            quiet maybe_sudo apt-get update -y || die "apt_update_failed"
-            quiet maybe_sudo apt-get install -y python3.12 python3.12-venv python3.12-dev \
-                || die "python_install_failed"
-        fi
-    elif [ "$OS_ID" = "debian" ]; then
-        if ! grep -rq "bookworm-backports" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
-            echo "deb http://deb.debian.org/debian bookworm-backports main" \
-                | maybe_sudo tee /etc/apt/sources.list.d/bookworm-backports.list >/dev/null
-            quiet maybe_sudo apt-get update -y || die "apt_update_failed"
-        fi
-        quiet maybe_sudo apt-get install -y -t bookworm-backports \
-                python3.12 python3.12-venv python3.12-dev \
+    if ! quiet maybe_sudo apt-get install -y python3.12 python3.12-venv python3.12-dev; then
+        quiet maybe_sudo apt-get install -y software-properties-common \
+            || die "software_properties_install_failed"
+        quiet maybe_sudo add-apt-repository -y ppa:deadsnakes/ppa \
+            || die "deadsnakes_ppa_failed"
+        quiet maybe_sudo apt-get update -y || die "apt_update_failed"
+        quiet maybe_sudo apt-get install -y python3.12 python3.12-venv python3.12-dev \
             || die "python_install_failed"
     fi
 

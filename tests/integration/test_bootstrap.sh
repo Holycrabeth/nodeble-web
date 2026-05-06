@@ -2,15 +2,14 @@
 # tests/integration/test_bootstrap.sh — Path C Phase B.1 acceptance tests
 # Per CTO spec §9 (~/projects/cto/reviews/2026-05-05-bootstrap-sh-design.md).
 #
-# Status (5/6 SGT Session 2 partial):
-#   - Failure-mode tests:  IMPLEMENTED + runnable today (greenlit)
-#   - Happy-path tests:    SKIP-stubbed pending CTO arbitration on
-#                          nodeble-api-server private-repo blocker
-#                          (Options 1/2/3/4 — see DEV_MEMORY.md 5/6).
+# Status (5/6 SGT Session 2 ship — CEO Option 1 ratified, Debian 12 dropped):
+#   - Failure-mode tests:  rocky-9 + debian-12 (unsupported_os) + sudo-missing
+#                          + network-none + github-token-missing + pat-redacted
+#   - Happy-path tests:    Ubuntu 22.04 + Ubuntu 24.04 only
 #
-# Substitution: spec §9.2 references `centos:9` which is deprecated on
-# Docker Hub. Using `rockylinux:9` instead — same RHEL-derivative class,
-# bootstrap rejects with `unsupported_os` (OS_ID=rocky).
+# Spec §9.2 referenced `centos:9` (deprecated on Docker Hub) → `rockylinux:9`.
+# `debian:12` added to unsupported_os family per CEO 5/6 Option 1 ratification
+# (bookworm + bookworm-backports lack python3.12).
 
 set -euo pipefail
 
@@ -22,11 +21,12 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BOOTSTRAP_SH="$REPO_ROOT/bootstrap.sh"
 LOG_DIR="$SCRIPT_DIR/.logs"
 
-# Distros for happy-path matrix (CTO spec §9.1) — systemd-enabled fixtures
+# Distros for happy-path matrix — systemd-enabled fixtures.
+# Debian 12 dropped per CEO 5/6 Option 1 (bookworm lacks python3.12);
+# verified via `unsupported_os` failure-mode test below instead.
 HAPPY_DISTROS=(
     "ubuntu-22|jrei/systemd-ubuntu:22.04"
     "ubuntu-24|jrei/systemd-ubuntu:24.04"
-    "debian-12|jrei/systemd-debian:12"
 )
 
 # ──────────────────────────────────────────────────────────────────
@@ -127,24 +127,41 @@ start_systemd_container() {
 }
 
 # ──────────────────────────────────────────────────────────────────
-# Failure-mode test 1: unsupported OS (rockylinux:9 stand-in for centos:9)
+# Failure-mode test 1: unsupported OS family
+# - rockylinux:9 (RHEL-derivative; substitute for centos:9 deprecated in Docker Hub)
+# - debian:12 (CEO 5/6 Option 1 — Debian dropped from supported OS)
+# Both must fail at os-check with STATUS: failure: unsupported_os
 # ──────────────────────────────────────────────────────────────────
 test_unsupported_os() {
-    info "test_unsupported_os: bootstrap.sh on rockylinux:9 → STATUS: failure: unsupported_os"
-    local container="bootstrap-test-rocky9"
-    local log="$LOG_DIR/unsupported-os.log"
+    info "test_unsupported_os: rockylinux:9 + debian:12 must both STATUS: failure: unsupported_os"
+    local distros=(
+        "rocky-9|rockylinux:9"
+        "debian-12|debian:12"
+    )
+    local entry label image container log fails=0
+    for entry in "${distros[@]}"; do
+        label="${entry%%|*}"
+        image="${entry#*|}"
+        container="bootstrap-test-unsupp-$label"
+        log="$LOG_DIR/unsupported-os-$label.log"
 
-    start_plain_container "$container" "rockylinux:9"
-    docker cp "$BOOTSTRAP_SH" "$container:/tmp/bootstrap.sh" >/dev/null
-    docker exec "$container" bash /tmp/bootstrap.sh > "$log" 2>&1 || true
+        start_plain_container "$container" "$image"
+        docker cp "$BOOTSTRAP_SH" "$container:/tmp/bootstrap.sh" >/dev/null
+        docker exec "$container" bash /tmp/bootstrap.sh > "$log" 2>&1 || true
 
-    if assert_status "$log" "failure: unsupported_os"; then
-        pass "test_unsupported_os"
+        if ! assert_status "$log" "failure: unsupported_os"; then
+            echo "  [$label] expected 'STATUS: failure: unsupported_os' in $log" >&2
+            dump_log "$log"
+            fails=$((fails + 1))
+        fi
+        docker rm -f "$container" >/dev/null
+    done
+
+    if [ "$fails" -eq 0 ]; then
+        pass "test_unsupported_os (rocky-9 + debian-12)"
     else
-        fail "test_unsupported_os: missing 'STATUS: failure: unsupported_os'"
-        dump_log "$log"
+        fail "test_unsupported_os: $fails sub-test(s) failed"
     fi
-    docker rm -f "$container" >/dev/null
 }
 
 # ──────────────────────────────────────────────────────────────────
@@ -276,14 +293,6 @@ test_happy_path() {
         skip "test_happy_path[$label]: NODEBLE_TEST_PAT env not set (export NODEBLE_TEST_PAT=\$(cat ~/.config/nodeble-bootstrap-pat) to resume)"
         return
     fi
-    # Debian 12 hard constraint (5/6 SGT verify-from-source): bookworm + bookworm-backports
-    # ship only python3.11; no path to python3.12 short of source-build / pyenv / deadsnakes-
-    # equivalent. Surfaced to 协作总监 + CTO for arbitration (drop Debian 12 vs relax to
-    # python3.11 vs source-build vs deadsnakes-equivalent). Tests held until decision.
-    if [ "$label" = "debian-12" ]; then
-        skip "test_happy_path[debian-12]: HOLD — Debian 12 lacks python3.12 in main+backports (5/6 SGT escalation)"
-        return
-    fi
 
     info "test_happy_path[$label]: fresh install on $image → STATUS: success + RESULT_*"
     local container="bootstrap-test-happy-$label"
@@ -335,10 +344,6 @@ test_idempotent_rerun() {
         skip "test_idempotent_rerun[$label]: NODEBLE_TEST_PAT env not set"
         return
     fi
-    if [ "$label" = "debian-12" ]; then
-        skip "test_idempotent_rerun[debian-12]: HOLD downstream of test_happy_path[debian-12]"
-        return
-    fi
     local container="bootstrap-test-happy-$label"
     if ! container_running "$container"; then
         skip "test_idempotent_rerun[$label]: container missing (test_happy_path failed?)"
@@ -363,10 +368,6 @@ test_uninstall_reinstall() {
     local label="$1"
     if [ -z "${NODEBLE_TEST_PAT:-}" ]; then
         skip "test_uninstall_reinstall[$label]: NODEBLE_TEST_PAT env not set"
-        return
-    fi
-    if [ "$label" = "debian-12" ]; then
-        skip "test_uninstall_reinstall[debian-12]: HOLD downstream of test_happy_path[debian-12]"
         return
     fi
     local container="bootstrap-test-happy-$label"
