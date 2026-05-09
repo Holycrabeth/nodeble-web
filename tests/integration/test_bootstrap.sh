@@ -126,6 +126,15 @@ start_systemd_container() {
     sleep 3
 }
 
+# Phase B.2 contract: --mode required, --config required (unless --dry-run).
+# Helper writes a minimal single-bot bundle for tests that exercise full flow.
+write_min_single_bot_bundle() {
+    local container="$1"
+    docker exec -i "$container" bash -c 'cat > /tmp/min-bundle.json' <<'EOF'
+{"module":"bootstrap-bundle","config_version":1,"mode":"single-bot","api_server":{"module":"api-server","config_version":1}}
+EOF
+}
+
 # ──────────────────────────────────────────────────────────────────
 # Failure-mode test 1: unsupported OS family
 # - rockylinux:9 (RHEL-derivative; substitute for centos:9 deprecated in Docker Hub)
@@ -147,7 +156,9 @@ test_unsupported_os() {
 
         start_plain_container "$container" "$image"
         docker cp "$BOOTSTRAP_SH" "$container:/tmp/bootstrap.sh" >/dev/null
-        docker exec "$container" bash /tmp/bootstrap.sh > "$log" 2>&1 || true
+        # --mode + --dry-run: dry-run probes os-check (which fails with unsupported_os
+        # before reaching anything that needs --config)
+        docker exec "$container" bash /tmp/bootstrap.sh --mode single-bot --dry-run > "$log" 2>&1 || true
 
         if ! assert_status "$log" "failure: unsupported_os"; then
             echo "  [$label] expected 'STATUS: failure: unsupported_os' in $log" >&2
@@ -176,7 +187,8 @@ test_requires_sudo() {
     docker exec "$container" useradd -m -s /bin/bash testuser >/dev/null
     docker cp "$BOOTSTRAP_SH" "$container:/tmp/bootstrap.sh" >/dev/null
     docker exec "$container" chmod 755 /tmp/bootstrap.sh
-    docker exec --user testuser "$container" bash /tmp/bootstrap.sh > "$log" 2>&1 || true
+    docker exec --user testuser "$container" \
+        bash /tmp/bootstrap.sh --mode single-bot --dry-run > "$log" 2>&1 || true
 
     if assert_status "$log" "failure: requires_sudo"; then
         pass "test_requires_sudo"
@@ -198,10 +210,13 @@ test_network_none() {
 
     start_plain_container "$container" "ubuntu:22.04" --network none
     docker cp "$BOOTSTRAP_SH" "$container:/tmp/bootstrap.sh" >/dev/null
-    docker exec "$container" bash /tmp/bootstrap.sh > "$log" 2>&1 || true
+    write_min_single_bot_bundle "$container"
+    docker exec "$container" \
+        bash /tmp/bootstrap.sh --mode single-bot --config /tmp/min-bundle.json > "$log" 2>&1 || true
 
-    # Steps that touch the network (precise expected reasons):
-    local network_reasons='(apt_update_failed|software_properties_install_failed|deadsnakes_ppa_failed|python_install_failed|git_clone_failed|git_update_failed)'
+    # Steps that touch the network (precise expected reasons; apt_prereqs_failed
+    # added to set per Phase B.2 — apt-prereqs runs before python-install):
+    local network_reasons='(apt_update_failed|apt_prereqs_failed|software_properties_install_failed|deadsnakes_ppa_failed|python_install_failed|git_clone_failed|git_update_failed)'
     if grep -qE "^STATUS: failure: $network_reasons" "$log"; then
         pass "test_network_none"
     else
@@ -221,13 +236,16 @@ test_github_token_missing() {
     local log="$LOG_DIR/github-token-missing.log"
 
     start_systemd_container "$container" "jrei/systemd-ubuntu:24.04"
-    # Pre-stage prereqs so bootstrap reaches step_clone_repo (where token check fires)
-    docker exec "$container" apt-get update -qq >/dev/null 2>&1
-    docker exec "$container" apt-get install -qq -y python3.12 python3.12-venv git curl sudo iproute2 ca-certificates >/dev/null 2>&1
+    # Phase B.2 bootstrap apt-installs git/jq/etc itself (step_apt_prereqs); fixture
+    # only needs sudo + iproute2 + ca-certs (NOT python3.12 — bootstrap installs).
+    docker exec "$container" apt-get update -qq >/dev/null 2>&1 || true
+    docker exec "$container" apt-get install -qq -y sudo iproute2 ca-certificates >/dev/null 2>&1 || true
     docker cp "$BOOTSTRAP_SH" "$container:/tmp/bootstrap.sh" >/dev/null
+    write_min_single_bot_bundle "$container"
 
     # Run WITHOUT GITHUB_TOKEN env (deliberately not setting it)
-    docker exec "$container" bash /tmp/bootstrap.sh > "$log" 2>&1 || true
+    docker exec "$container" \
+        bash /tmp/bootstrap.sh --mode single-bot --config /tmp/min-bundle.json > "$log" 2>&1 || true
 
     if assert_status "$log" "failure: missing_github_token"; then
         pass "test_github_token_missing"
@@ -250,12 +268,14 @@ test_pat_redacted_in_error_output() {
     local fake_pat="ghp_FAKETESTPATFORREDACTIONVERIFICATION1234567890"
 
     start_systemd_container "$container" "jrei/systemd-ubuntu:24.04"
-    docker exec "$container" apt-get update -qq >/dev/null 2>&1
-    docker exec "$container" apt-get install -qq -y python3.12 python3.12-venv git curl sudo iproute2 ca-certificates >/dev/null 2>&1
+    docker exec "$container" apt-get update -qq >/dev/null 2>&1 || true
+    docker exec "$container" apt-get install -qq -y sudo iproute2 ca-certificates >/dev/null 2>&1 || true
     docker cp "$BOOTSTRAP_SH" "$container:/tmp/bootstrap.sh" >/dev/null
+    write_min_single_bot_bundle "$container"
 
     # Run with INVALID PAT — clone will fail (401); verify PAT not leaked anywhere
-    docker exec --env "GITHUB_TOKEN=$fake_pat" "$container" bash /tmp/bootstrap.sh > "$log" 2>&1 || true
+    docker exec --env "GITHUB_TOKEN=$fake_pat" "$container" \
+        bash /tmp/bootstrap.sh --mode single-bot --config /tmp/min-bundle.json > "$log" 2>&1 || true
 
     if grep -q "$fake_pat" "$log"; then
         fail "test_pat_redacted_in_error_output: fake PAT '$fake_pat' appeared in log!"
@@ -300,11 +320,13 @@ test_happy_path() {
 
     start_systemd_container "$container" "$image"
     docker exec "$container" apt-get update -qq >/dev/null 2>&1 || true
-    docker exec "$container" apt-get install -qq -y curl git sudo iproute2 ca-certificates >/dev/null 2>&1 || true
+    docker exec "$container" apt-get install -qq -y sudo iproute2 ca-certificates >/dev/null 2>&1 || true
     docker cp "$BOOTSTRAP_SH" "$container:/tmp/bootstrap.sh" >/dev/null
+    write_min_single_bot_bundle "$container"
 
     docker exec --env "GITHUB_TOKEN=$NODEBLE_TEST_PAT" "$container" \
-        bash /tmp/bootstrap.sh > "$log" 2>&1 || true
+        bash /tmp/bootstrap.sh --mode single-bot --config /tmp/min-bundle.json \
+        > "$log" 2>&1 || true
 
     # Defensive: scan for PAT leak in any log (security regression check)
     if grep -q "$NODEBLE_TEST_PAT" "$log"; then
@@ -354,7 +376,8 @@ test_idempotent_rerun() {
     local log="$LOG_DIR/happy-$label-rerun.log"
 
     docker exec --env "GITHUB_TOKEN=$NODEBLE_TEST_PAT" "$container" \
-        bash /tmp/bootstrap.sh > "$log" 2>&1 || true
+        bash /tmp/bootstrap.sh --mode single-bot --config /tmp/min-bundle.json \
+        > "$log" 2>&1 || true
 
     if assert_status "$log" "already_installed"; then
         pass "test_idempotent_rerun[$label]"
@@ -388,7 +411,8 @@ test_uninstall_reinstall() {
     ' >/dev/null 2>&1 || true
 
     docker exec --env "GITHUB_TOKEN=$NODEBLE_TEST_PAT" "$container" \
-        bash /tmp/bootstrap.sh > "$log" 2>&1 || true
+        bash /tmp/bootstrap.sh --mode single-bot --config /tmp/min-bundle.json \
+        > "$log" 2>&1 || true
 
     if assert_status "$log" "success"; then
         pass "test_uninstall_reinstall[$label]"
