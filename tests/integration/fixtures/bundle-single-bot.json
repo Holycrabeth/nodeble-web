@@ -1,0 +1,9 @@
+{
+    "module": "bootstrap-bundle",
+    "config_version": 1,
+    "mode": "single-bot",
+    "api_server": {
+        "module": "api-server",
+        "config_version": 1
+    }
+}
