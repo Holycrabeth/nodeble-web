@@ -1,0 +1,31 @@
+{
+    "module": "bootstrap-bundle",
+    "config_version": 1,
+    "mode": "multi-module",
+    "api_server": {
+        "module": "api-server",
+        "config_version": 1
+    },
+    "orchestrator": {
+        "nlv": 320000,
+        "floor": 20,
+        "reserve": 30,
+        "fred_key": "test-fred-key"
+    },
+    "allocator": {
+        "module": "allocator",
+        "config_version": 1,
+        "broker": {
+            "tiger_id": "test-tiger-id",
+            "account": "test-account",
+            "private_key_path": "/tmp/test-tiger.pem"
+        },
+        "portfolio": {
+            "base_cash_floor_pct": 0.20,
+            "max_additional_reserve_pct": 0.30
+        },
+        "base_weights": {
+            "ic": 1.0
+        }
+    }
+}

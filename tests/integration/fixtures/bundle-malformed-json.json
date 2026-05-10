@@ -1,0 +1,6 @@
+{
+    "module": "bootstrap-bundle",
+    "config_version": 1,
+    "mode": "multi-module"
+    "api_server":
+}

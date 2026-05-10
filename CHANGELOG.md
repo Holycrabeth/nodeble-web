@@ -6,6 +6,22 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ## [Unreleased]
 
+### Added (Phase 3 — chain Docker matrix; Path C 4-tier coverage closeout)
+- **`tests/integration/test_bootstrap_chain.sh`** extended (412 → 866 LoC) per CTO 2026-05-10 spec (`cto/reviews/2026-05-10-bootstrap-chain-phase-3-docker-matrix-spec.md`). 14 new tests across 4 sections (failure-mode + failure isolation + idempotency-recovery + bundle validation).
+- **`tests/integration/fixtures/`** (NEW directory; 7 JSON fixtures): `bundle-multi-module.json` / `bundle-single-bot.json` / `bundle-malformed-json.json` / `bundle-missing-module-field.json` / `bundle-wrong-config-version.json` / `bundle-orch-missing-required.json` / `bundle-failing-orch.json`. Replaces inline heredoc bundle generation; reusable + intentional-schema-violation fixtures.
+- **Section 3 — Failure-mode** (4 tests): `test_chain_unsupported_os` (rocky-9 + debian-12 consolidated) / `test_chain_requires_sudo` / `test_chain_network_none` / `test_chain_missing_github_token`.
+- **Section 4 — Failure isolation** (3 tests; verifies B.2 §7 contract empirically): `test_chain_orch_clone_failed_isolates_api_server` / `test_chain_orch_install_failed_isolates_api_server` / `test_chain_allocator_install_failed_isolates_prior`. Each verifies (a) earlier sub-deploy stays installed (no rollback), (b) downstream sub-deploys NOT reached, (c) systemd service still active.
+- **Section 5 — Idempotency + partial-state recovery** (3 tests): `test_chain_aggregate_already_installed_multi_module` (strict per-step assertions) / `test_chain_partial_state_resumes_from_orch` (api-server-only state → orch + allocator install) / `test_chain_partial_state_resumes_from_allocator` (api-server + orch state → allocator only installs).
+- **Section 6 — Bundle JSON validation** (3 tests): `test_chain_bundle_missing_top_level_module_field` / `test_chain_bundle_wrong_config_version` / `test_chain_bundle_orch_missing_required`. Each asserts exit 3 + `STATUS: failure: bundle_invalid: <field-pattern>`.
+- **Section 2 — Multi-distro extension** (1 test): `test_chain_single_bot[ubuntu-24]` (B.2 covered ubuntu-22 only).
+- **L1 §4 dual-deployment-mode enforcement verified empirically**: `test_chain_single_bot` confirms orch + allocator clone steps NOT attempted in single-bot mode; `test_chain_multi_module` confirms all 3 sub-deploys invoked in multi-module mode.
+
+### Test results 5/10 SGT
+- **23 PASS / 0 FAIL / 0 SKIP** (full chain matrix). Single-session ship clean. 0 production bugs surfaced (matches IC mirror pattern per spec §8 expectation; B.2's 5-iter chain logic exhaust pre-empted Phase 3 surface).
+
+### Refactored
+- `write_bundle_multi_module` + `write_bundle_single_bot` reduced to one-line wrappers around new `copy_fixture` helper (replaces inline heredoc generation).
+
 ### Added (Phase B.2 — chain orchestration)
 - **`bootstrap.sh` chain mode** for installing api-server + orchestrator + allocator in one invocation. CTO 2026-05-09 spec (`cto/reviews/2026-05-09-bootstrap-sh-phase-b2-chain-spec.md`) ratified. CEO 2026-05-09 Option A (orch existing CLI-flag contract; orch Phase 2 upgrade tracked P3 backlog).
 - New flags: `--mode <multi-module|single-bot>` (REQUIRED — L1 §4 dual-deployment-mode enforcement) + `--config <bundle.json>` (REQUIRED unless `--dry-run`) + `--skip-tiger-test` + `--tiger-properties <path>`.
