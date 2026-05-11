@@ -332,7 +332,10 @@ step_idempotency_probe() {
         # (matches Phase B.1 behavior; preserves curl-bootstrap-as-status-probe pattern)
         if [ "$MODE" = "single-bot" ]; then
             if [ -n "$token" ]; then
-                emit_result TOKEN "$token"
+                # Canonical key per CTO Q4 ack 2026-05-11 (Option A rename
+                # `TOKEN` → `BEARER_TOKEN`). Mac wizard Journey 1 parser regex
+                # `^RESULT_BEARER_TOKEN:\s*(.+)$` consumes this line.
+                emit_result BEARER_TOKEN "$token"
             fi
             if [ -n "$fingerprint" ]; then
                 emit_result FINGERPRINT "$fingerprint"
@@ -929,7 +932,9 @@ step_allocator_install() {
 # ──────────────────────────────────────────────────────────────────
 emit_chain_results() {
     if [ -n "$BOOTSTRAP_TOKEN" ]; then
-        emit_result TOKEN "$BOOTSTRAP_TOKEN"
+        # Canonical key per CTO Q4 ack 2026-05-11 (Option A rename TOKEN → BEARER_TOKEN).
+        # Mac wizard Journey 1 parser regex `^RESULT_BEARER_TOKEN:\s*(.+)$`.
+        emit_result BEARER_TOKEN "$BOOTSTRAP_TOKEN"
     fi
     if [ -n "$BOOTSTRAP_FINGERPRINT" ]; then
         emit_result FINGERPRINT "$BOOTSTRAP_FINGERPRINT"
