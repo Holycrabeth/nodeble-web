@@ -340,7 +340,8 @@ test_happy_path() {
         dump_log "$log"
         return
     fi
-    if ! assert_result "$log" "TOKEN" \
+    # Canonical key `RESULT_BEARER_TOKEN` per CTO Q4 ack 2026-05-11 (Option A rename).
+    if ! assert_result "$log" "BEARER_TOKEN" \
        || ! assert_result "$log" "FINGERPRINT" \
        || ! assert_result "$log" "PORT" "8765"; then
         fail "test_happy_path[$label]: missing one or more RESULT_* lines"
@@ -426,6 +427,37 @@ test_uninstall_reinstall() {
 }
 
 # ──────────────────────────────────────────────────────────────────
+# Contract test (CTO Q4 ack 2026-05-11 Option A rename): bootstrap.sh
+# stdout MUST emit `RESULT_BEARER_TOKEN: <uuid-v4>` line on happy-path
+# install success. UUID v4 = 32 hex digits + 4 hyphens in 8-4-4-4-12 grouping
+# (matches python uuid.uuid4() output used in step_generate_api_token).
+# Mac wizard Journey 1 SetupWizard.tsx parser regex
+# `^RESULT_BEARER_TOKEN:\s*(.+)$` consumes this line.
+# ──────────────────────────────────────────────────────────────────
+test_bootstrap_emits_bearer_token_uuid_v4() {
+    info "test_bootstrap_emits_bearer_token_uuid_v4: canonical RESULT_BEARER_TOKEN UUID v4 contract"
+    if [ -z "${NODEBLE_TEST_PAT:-}" ]; then
+        skip "test_bootstrap_emits_bearer_token_uuid_v4: NODEBLE_TEST_PAT not set"
+        return
+    fi
+    # Reuse test_happy_path[ubuntu-22]'s log (runs earlier in same suite). No need
+    # for own container — contract assertion is pure log-grep.
+    local log="$LOG_DIR/happy-ubuntu-22-fresh.log"
+    if [ ! -r "$log" ]; then
+        skip "test_bootstrap_emits_bearer_token_uuid_v4: prereq log $log missing (test_happy_path[ubuntu-22] didn't run)"
+        return
+    fi
+    # Strict UUID v4 shape: 8-4-4-4-12 hex grouping; python uuid.uuid4() lowercase output
+    local uuid_re='^RESULT_BEARER_TOKEN: [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    if grep -qE "$uuid_re" "$log"; then
+        pass "test_bootstrap_emits_bearer_token_uuid_v4"
+    else
+        fail "test_bootstrap_emits_bearer_token_uuid_v4: no RESULT_BEARER_TOKEN UUID v4 line in $log"
+        dump_log "$log"
+    fi
+}
+
+# ──────────────────────────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────────────────────────
 main() {
@@ -455,6 +487,10 @@ main() {
         test_idempotent_rerun "$label"
         test_uninstall_reinstall "$label"
     done
+
+    info ""
+    info "=== Contract test (CTO Q4 ack 2026-05-11 — Option A rename) ==="
+    test_bootstrap_emits_bearer_token_uuid_v4
 
     info ""
     info "=== Summary ==="
