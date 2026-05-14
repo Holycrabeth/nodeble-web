@@ -29,6 +29,23 @@ HAPPY_DISTROS=(
     "ubuntu-24|jrei/systemd-ubuntu:24.04"
 )
 
+# Distros for python-install fallback verification (Yongtao 5/14 P0
+# T-20260514-160943 — non-LTS Ubuntu fallback, mirrors PR #9
+# nodeble-api-server@9950b0f). Plain containers (NOT systemd-enabled);
+# bootstrap dies later at enable-linger (no systemd) but `STEP:
+# python-install ✓` marker is the gate. Tests all 3 supported Ubuntu
+# release paths:
+#   ubuntu:22.04 → Attempt 3 (deadsnakes, system python3=3.10)
+#   ubuntu:24.04 → Attempt 1 (main repos, python3.12 in 24.04 main)
+#   ubuntu:25.10 → Attempt 2 (system python3=3.13 symlinked, NEW)
+# debian:12 excluded — intentionally rejected at os-check per CEO 5/6
+# Option 1 (covered by test_unsupported_os).
+PYINSTALL_DISTROS=(
+    "ubuntu-22|ubuntu:22.04"
+    "ubuntu-24|ubuntu:24.04"
+    "ubuntu-25|ubuntu:25.10"
+)
+
 # ──────────────────────────────────────────────────────────────────
 # Result tracking
 # ──────────────────────────────────────────────────────────────────
@@ -284,9 +301,17 @@ test_pat_redacted_in_error_output() {
         return
     fi
 
-    # Sanity: clone should have failed (with redacted output evident OR distinct status)
-    if ! grep -qE "^STATUS: failure:" "$log"; then
-        fail "test_pat_redacted_in_error_output: expected clone failure but no failure STATUS"
+    # Sanity: clone-repo step must have been reached (proof-of-execution
+    # gate). Original sanity assumed `STATUS: failure:` because the repo
+    # was private + invalid PAT would 401. As of 5/12 协作总监 toggle
+    # (nodeble-api-server public), invalid PAT no longer fails the clone
+    # — bootstrap proceeds through to STATUS: success. The redaction
+    # property (line 297 grep) remains the primary security gate; we
+    # just need to confirm bootstrap actually got to clone-repo (i.e.
+    # didn't bail at an earlier step that would have skipped the PAT
+    # handling code path entirely).
+    if ! grep -qE "^STEP: clone-repo" "$log"; then
+        fail "test_pat_redacted_in_error_output: bootstrap didn't reach clone-repo step"
         dump_log "$log"
         docker rm -f "$container" >/dev/null
         return
@@ -434,6 +459,72 @@ test_uninstall_reinstall() {
 # Mac wizard Journey 1 SetupWizard.tsx parser regex
 # `^RESULT_BEARER_TOKEN:\s*(.+)$` consumes this line.
 # ──────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────
+# Test: python-install fallback succeeds on each supported Ubuntu distro
+# (Yongtao 5/14 P0 T-20260514-160943 — non-LTS support, mirrors PR #9
+# nodeble-api-server@9950b0f test 6). Plain containers + gate on
+# `STEP: python-install ✓` marker. Bootstrap dies later at enable-linger
+# (no systemd in plain containers) — that's expected.
+#
+# Expected fallback per distro:
+#   ubuntu-22 → Attempt 3 (deadsnakes PPA; system python3=3.10 < 3.12)
+#   ubuntu-24 → Attempt 1 (main repos; python3.12 in 24.04 main)
+#   ubuntu-25 → Attempt 2 (system python3=3.13 symlinked; NEW path,
+#               deadsnakes returns 404 on questing)
+# ──────────────────────────────────────────────────────────────────
+test_python_install() {
+    info "test_python_install: step_python_install ✓ on 3 Ubuntu distros (mirror PR #9 api-server@9950b0f)"
+    local entry label image container log rc detail fails=0
+    for entry in "${PYINSTALL_DISTROS[@]}"; do
+        label="${entry%%|*}"
+        image="${entry#*|}"
+        container="bootstrap-test-pyinstall-$label"
+        log="$LOG_DIR/python-install-$label.log"
+
+        start_plain_container "$container" "$image"
+        # Pre-install tooling. software-properties-common needed by Attempt 3
+        # (deadsnakes) — provides add-apt-repository on minimal images that
+        # may not include it. `-e DEBIAN_FRONTEND=noninteractive` prevents
+        # apt from prompting on tzdata / libc6 service restart (would
+        # otherwise hang docker exec waiting for stdin — PR #9 first CI run
+        # cancellation root cause).
+        docker exec -e DEBIAN_FRONTEND=noninteractive "$container" \
+            apt-get update -y >/dev/null 2>&1 || true
+        docker exec -e DEBIAN_FRONTEND=noninteractive "$container" \
+            apt-get install -y curl git openssl sudo software-properties-common \
+            >/dev/null 2>&1 || true
+
+        docker cp "$BOOTSTRAP_SH" "$container:/tmp/bootstrap.sh" >/dev/null
+        write_min_single_bot_bundle "$container"
+
+        # `timeout 600` defensive cap. Bootstrap dies at enable-linger
+        # downstream (no systemd in plain containers); we gate on
+        # python-install ✓ marker, not overall exit. --mode single-bot
+        # + min bundle avoids needing PAT (api-server clone happens
+        # AFTER python-install, never reached due to enable-linger fail).
+        set +e
+        timeout 600 docker exec -e DEBIAN_FRONTEND=noninteractive "$container" \
+            bash /tmp/bootstrap.sh --mode single-bot --config /tmp/min-bundle.json \
+            > "$log" 2>&1
+        rc=$?
+        set -e
+
+        if assert_step_ok "$log" "python-install"; then
+            detail=$(grep "^STEP: python-install ✓" "$log" | head -1 | sed 's|^STEP: python-install ✓ *||')
+            pass "test_python_install[$label] ($detail)"
+        elif [ "$rc" -eq 124 ]; then
+            fail "test_python_install[$label]: bootstrap.sh exceeded 600s timeout"
+            dump_log "$log"
+            fails=$((fails + 1))
+        else
+            fail "test_python_install[$label]: STEP: python-install ✓ not found (rc=$rc)"
+            dump_log "$log"
+            fails=$((fails + 1))
+        fi
+        docker rm -f "$container" >/dev/null 2>&1 || true
+    done
+}
+
 test_bootstrap_emits_bearer_token_uuid_v4() {
     info "test_bootstrap_emits_bearer_token_uuid_v4: canonical RESULT_BEARER_TOKEN UUID v4 contract"
     if [ -z "${NODEBLE_TEST_PAT:-}" ]; then
@@ -477,6 +568,7 @@ main() {
     test_network_none
     test_github_token_missing
     test_pat_redacted_in_error_output
+    test_python_install
     info ""
     info "=== Happy-path tests (need NODEBLE_TEST_PAT env) ==="
     local entry label image
