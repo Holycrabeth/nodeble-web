@@ -301,9 +301,17 @@ test_pat_redacted_in_error_output() {
         return
     fi
 
-    # Sanity: clone should have failed (with redacted output evident OR distinct status)
-    if ! grep -qE "^STATUS: failure:" "$log"; then
-        fail "test_pat_redacted_in_error_output: expected clone failure but no failure STATUS"
+    # Sanity: clone-repo step must have been reached (proof-of-execution
+    # gate). Original sanity assumed `STATUS: failure:` because the repo
+    # was private + invalid PAT would 401. As of 5/12 协作总监 toggle
+    # (nodeble-api-server public), invalid PAT no longer fails the clone
+    # — bootstrap proceeds through to STATUS: success. The redaction
+    # property (line 297 grep) remains the primary security gate; we
+    # just need to confirm bootstrap actually got to clone-repo (i.e.
+    # didn't bail at an earlier step that would have skipped the PAT
+    # handling code path entirely).
+    if ! grep -qE "^STEP: clone-repo" "$log"; then
+        fail "test_pat_redacted_in_error_output: bootstrap didn't reach clone-repo step"
         dump_log "$log"
         docker rm -f "$container" >/dev/null
         return
