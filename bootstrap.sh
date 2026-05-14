@@ -19,6 +19,15 @@
 
 set -euo pipefail
 
+# Suppress apt interactive prompts (tzdata / libc6 service restart / etc.)
+# globally. Without this, apt-get install on minimal cloud images / Docker
+# containers / SSH non-tty exec hangs waiting for tty input that never
+# arrives. Surfaced 5/14 via PR #9 (nodeble-api-server@9950b0f) CI test 6
+# deadsnakes-path stall on ubuntu:22.04. Same latent bug applies here:
+# Mac App SSH exec into customer VPS is non-tty, would hit the same hang.
+# Mirror PR #9 9950b0f fix per Yongtao 5/14 T-20260514-160943 verdict (a).
+export DEBIAN_FRONTEND=noninteractive
+
 # ──────────────────────────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────────────────────────
@@ -416,39 +425,90 @@ step_disk_check() {
 # Step 3 — Python 3.12+
 # ──────────────────────────────────────────────────────────────────
 step_python_install() {
-    # Ensure python3.12 + venv + dev all installed (binary alone insufficient —
-    # Ubuntu 24.04 ships python3.12 in main but python3.12-venv as separate pkg
-    # that may be absent on minimal images). apt-get install is idempotent.
-    # Ubuntu 22.04 main lacks python3.12 → deadsnakes PPA fallback.
+    # 3-attempt fallback chain (Yongtao 5/14 P0 T-20260514-160943, mirrors
+    # PR #9 9950b0f nodeble-api-server fix). bootstrap.sh must work on ANY
+    # Ubuntu release including dev releases (e.g. 25.10 questing where
+    # deadsnakes PPA returns 404). Yongtao 5/14 directive: "我们不应该
+    # 随随便便就告诉别人 vps 是选什么版本的。"
+    #   Attempt 1 — apt-get install python3.12 from main repos (Ubuntu
+    #               24.04+ ships python3.12 in main; fastest path).
+    #   Attempt 2 — system python3 ≥ 3.12 symlinked as python3.12 (non-LTS
+    #               releases like 25.10 questing ship newer Python natively
+    #               but deadsnakes PPA doesn't cover them).
+    #   Attempt 3 — deadsnakes PPA (Ubuntu 22.04 LTS backstop where system
+    #               python3 is 3.10).
     quiet maybe_sudo apt-get update -y || die "apt_update_failed"
 
-    if ! quiet maybe_sudo apt-get install -y python3.12 python3.12-venv python3.12-dev; then
-        quiet maybe_sudo apt-get install -y software-properties-common \
-            || die "software_properties_install_failed"
-        quiet maybe_sudo add-apt-repository -y ppa:deadsnakes/ppa \
-            || die "deadsnakes_ppa_failed"
-        quiet maybe_sudo apt-get update -y || die "apt_update_failed"
-        quiet maybe_sudo apt-get install -y python3.12 python3.12-venv python3.12-dev \
-            || die "python_install_failed"
+    # Attempt 1: apt-get install python3.12 from main repos.
+    if quiet maybe_sudo apt-get install -y python3.12 python3.12-venv python3.12-dev; then
+        if command -v python3.12 >/dev/null 2>&1; then
+            _python_install_22lts_python3_symlink
+            local v
+            v=$(python3.12 --version 2>&1 | awk '{print $2}')
+            emit_step_ok "python-install" "Python $v ready (main repos)"
+            return 0
+        fi
     fi
+
+    # Attempt 2: system python3 ≥ 3.12 → symlink as /usr/local/bin/python3.12.
+    if command -v python3 >/dev/null 2>&1; then
+        local sys_full sys_major sys_minor
+        sys_full=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo "")
+        if [ -n "$sys_full" ]; then
+            sys_major="${sys_full%%.*}"
+            sys_minor="${sys_full##*.}"
+            if [ "$sys_major" = "3" ] && [ "$sys_minor" -ge 12 ] 2>/dev/null; then
+                # Install venv + dev modules for system python3 (separate
+                # packages on Ubuntu; needed for `python -m venv` and
+                # C-extension builds). `python3-venv` is a meta-package
+                # that tracks the system python3 major version.
+                quiet maybe_sudo apt-get install -y python3-venv python3-dev \
+                    || die "python3_venv_install_failed"
+                # Symlink system python3 → /usr/local/bin/python3.12 so the
+                # rest of bootstrap.sh (venv creation etc.) which hardcodes
+                # python3.12 resolves to the system 3.12+ binary.
+                local py3_path
+                py3_path=$(command -v python3)
+                maybe_sudo mkdir -p /usr/local/bin
+                maybe_sudo ln -sf "$py3_path" /usr/local/bin/python3.12 \
+                    || die "python3_12_symlink_failed"
+                emit_step_ok "python-install" "Python $sys_full (system) symlinked as python3.12 (non-LTS fallback)"
+                return 0
+            fi
+        fi
+    fi
+
+    # Attempt 3: deadsnakes PPA (Ubuntu 22.04 LTS backstop).
+    quiet maybe_sudo apt-get install -y software-properties-common \
+        || die "software_properties_install_failed"
+    quiet maybe_sudo add-apt-repository -y ppa:deadsnakes/ppa \
+        || die "deadsnakes_ppa_failed"
+    quiet maybe_sudo apt-get update -y || die "apt_update_failed"
+    quiet maybe_sudo apt-get install -y python3.12 python3.12-venv python3.12-dev \
+        || die "python_install_failed"
 
     if ! command -v python3.12 >/dev/null 2>&1; then
         die "python_install_failed"
     fi
 
-    # Ubuntu 22.04 ships python3=python3.10 as system default. Allocator deploy.sh
-    # (and likely other module deploy.sh) use bare `python3` not `python3.12` →
-    # would see 3.10 + fail prereq-check. Symlink in /usr/local/bin (PATH-precedence
-    # over /usr/bin) so PATH-based python3 lookups resolve to 3.12. /usr/bin/python3
-    # left intact to avoid breaking system tools that hardcode that path.
+    _python_install_22lts_python3_symlink
+    local v
+    v=$(python3.12 --version 2>&1 | awk '{print $2}')
+    emit_step_ok "python-install" "Python $v ready (deadsnakes PPA)"
+}
+
+# Helper: on Ubuntu 22.04 LTS, system python3 = 3.10 by default. After
+# python3.12 is installed (Attempt 1 or 3), symlink /usr/local/bin/python3
+# → /usr/bin/python3.12 so allocator deploy.sh + module deploy.sh that
+# invoke bare `python3` find 3.12 (PATH precedence: /usr/local/bin before
+# /usr/bin). /usr/bin/python3 left intact so system tools that hardcode
+# that path aren't broken. NOT needed on 24.04+ (system python3 already
+# ≥ 3.12) or on Attempt 2 path (system python3 ≥ 3.12 by definition).
+_python_install_22lts_python3_symlink() {
     if [ "$OS_ID" = "ubuntu" ] && [ "${OS_VERSION_ID%%.*}" = "22" ]; then
         maybe_sudo ln -sf /usr/bin/python3.12 /usr/local/bin/python3 \
             || emit_warn "python3 → python3.12 symlink failed (allocator may fail prereq-check)"
     fi
-
-    local v
-    v=$(python3.12 --version 2>&1 | awk '{print $2}')
-    emit_step_ok "python-install" "Python $v ready"
 }
 
 # ──────────────────────────────────────────────────────────────────
